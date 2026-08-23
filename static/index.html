@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LocalOps</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 0;
+            background: #111827;
+            color: #e5e7eb;
+        }
+
+        .app {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .panel {
+            background: #1f2937;
+            border: 1px solid #374151;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        input, button {
+            padding: 10px;
+            margin: 4px;
+            border-radius: 8px;
+            border: 1px solid #4b5563;
+        }
+
+        input {
+            background: #111827;
+            color: #f9fafb;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        #log {
+            height: 420px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            background: #030712;
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .grow {
+            flex: 1;
+            min-width: 220px;
+        }
+
+        .muted {
+            color: #9ca3af;
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <h1>LocalOps</h1>
+    <p class="muted">
+        Local network messaging, alerts and device status.
+    </p>
+
+    <div class="panel">
+        <div class="row">
+            <input id="username" placeholder="username">
+            <input id="password" type="password" placeholder="password">
+            <button onclick="registerUser()">Register</button>
+            <button onclick="loginUser()">Login</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div class="row">
+            <input id="room" placeholder="room" value="general">
+            <button onclick="joinRoom()">Join room</button>
+            <button onclick="sendSimple('users')">Users</button>
+            <button onclick="sendSimple('rooms')">Rooms</button>
+            <button onclick="sendSimple('devices')">Devices</button>
+        </div>
+    </div>
+
+    <div class="panel">
+        <div id="log"></div>
+    </div>
+
+    <div class="panel">
+        <div class="row">
+            <input
+                id="message"
+                class="grow"
+                placeholder="message or /msg user hello"
+                onkeydown="if(event.key === 'Enter') sendMessage();"
+            >
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let ws = null;
+
+    function log(text) {
+        const box = document.getElementById("log");
+        box.textContent += text + "\n";
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function connect() {
+        return new Promise((resolve, reject) => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                resolve();
+                return;
+            }
+
+            const scheme = location.protocol === "https:" ? "wss" : "ws";
+            ws = new WebSocket(`${scheme}://${location.host}/ws`);
+
+            ws.onopen = () => {
+                log("[SYSTEM] Connected to gateway.");
+                resolve();
+            };
+
+            ws.onerror = reject;
+
+            ws.onclose = () => {
+                log("[SYSTEM] Connection closed.");
+            };
+
+            ws.onmessage = event => {
+                const packet = JSON.parse(event.data);
+                renderPacket(packet);
+            };
+        });
+    }
+
+    async function send(packet) {
+        await connect();
+        ws.send(JSON.stringify(packet));
+    }
+
+    async function registerUser() {
+        await send({
+            type: "register",
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value
+        });
+    }
+
+    async function loginUser() {
+        await send({
+            type: "login",
+            username: document.getElementById("username").value,
+            password: document.getElementById("password").value
+        });
+    }
+
+    async function joinRoom() {
+        await send({
+            type: "join_room",
+            room: document.getElementById("room").value
+        });
+    }
+
+    async function sendSimple(type) {
+        await send({type});
+    }
+
+    async function sendMessage() {
+        const input = document.getElementById("message");
+        const text = input.value.trim();
+
+        if (!text) {
+            return;
+        }
+
+        if (text.startsWith("/msg ")) {
+            const parts = text.split(" ");
+
+            if (parts.length < 3) {
+                log("[USAGE] /msg <user> <message>");
+                return;
+            }
+
+            const target = parts[1];
+            const content = parts.slice(2).join(" ");
+
+            await send({
+                type: "private_message",
+                target,
+                content
+            });
+
+        } else {
+            await send({
+                type: "message",
+                content: text
+            });
+        }
+
+        input.value = "";
+    }
+
+    function renderPacket(packet) {
+        switch (packet.type) {
+            case "login_ok":
+                log(`[SYSTEM] Logged in as ${packet.username}, room #${packet.room}`);
+                break;
+
+            case "register_ok":
+                log(`[SYSTEM] ${packet.message}`);
+                break;
+
+            case "message":
+                log(`[${packet.room}] ${packet.sender}: ${packet.content}`);
+                break;
+
+            case "private_message":
+                log(`[DM from ${packet.sender}] ${packet.content}`);
+                break;
+
+            case "private_message_sent":
+                log(`[DM to ${packet.target}] ${packet.content}`);
+                break;
+
+            case "join":
+                log(`[SYSTEM] ${packet.nickname} joined #${packet.room}`);
+                break;
+
+            case "leave":
+                log(`[SYSTEM] ${packet.nickname} left #${packet.room}`);
+                break;
+
+            case "room_joined":
+                log(`[SYSTEM] Joined #${packet.room}`);
+                break;
+
+            case "users":
+                log(
+                    "[USERS] " +
+                    packet.users
+                        .map(u => `${u.username}(#${u.room})`)
+                        .join(", ")
+                );
+                break;
+
+            case "rooms":
+                log("[ROOMS] " + packet.rooms.join(", "));
+                break;
+
+            case "devices":
+                log(
+                    "[DEVICES] " +
+                    packet.devices
+                        .map(d => `${d.device_id}:${d.status}`)
+                        .join(", ")
+                );
+                break;
+
+            case "device_status":
+                log(
+                    `[DEVICE] ${packet.device.device_id} -> ${packet.device.status}`
+                );
+                break;
+
+            case "alert":
+                log(
+                    `[ALERT/${packet.level}] ${packet.source}: ${packet.message}`
+                );
+                break;
+
+            case "system":
+                log(`[SYSTEM] ${packet.message}`);
+                break;
+
+            case "error":
+                log(`[ERROR] ${packet.message}`);
+                break;
+
+            default:
+                log(JSON.stringify(packet));
+        }
+    }
+
+    connect().catch(() => {
+        log("[ERROR] Could not connect to gateway.");
+    });
+</script>
+</body>
+</html>
